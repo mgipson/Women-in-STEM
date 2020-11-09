@@ -1,49 +1,162 @@
+# make sure you have all of these imports
+# will also need to do
+    # python
+    # import nltk
+    # nltk.download('stopwords')
+    # nltk.download('punkt')
+
+
 from py2neo import Graph
-import nltk
+# import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+import wikipedia
 import re
 import multiprocessing
-import gensim.models.word2vec as w2v
+from gensim.models import Word2Vec
+from gensim.models import Doc2Vec
 import sklearn.manifold
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import spatial
+import pickle
+import gensim
+
 
 graph = None
+vocabulary = []
 descriptions_original = []
 descriptions = []
-corpus = []
-stops = set(stopwords.words("english"))
 word2vec_model = None
+word2vec_desc_points = pd.DataFrame()
+tagged_vocabulary = []
+doc2vec_model = None
 
-def data_prep():
+
+def connect_to_database():
     global graph
     port = input("Enter Neo4j DB Port: ")
     user = input("Enter Neo4j DB Username: ")
     pswd = input("Enter Neo4j DB Password: ")
     graph = Graph('bolt://localhost:'+port, auth=(user, pswd))
-    results = graph.run("""MATCH (n:Person) RETURN n.description AS description""").data()
 
+def generate_vocabulary():
+    connect_to_database()
+    global graph
+    #people nodes
+    people = graph.run("""CALL db.index.fulltext.queryNodes("People", "*") YIELD node RETURN DISTINCT node.name AS name, node.description AS description""").to_data_frame()
+    people_names = people['name'].to_list()
+    failed_people_summaries = []
+    global vocabulary
+    for i, person in enumerate(people_names):
+        if person:
+            vocabulary.append(person)
+            try:
+                #people summaries
+                search = wikipedia.search(person, results = 1, suggestion = True)
+                summary = wikipedia.summary(search)
+                clean_summary = clean(summary)
+                if clean_summary:
+                    vocabulary.append(clean_summary)
+            except:
+                print("SEARCH & SUMMARY FAILED FOR: ", person)
+                failed_people_summaries.append(person)
+    print('Failed to find summaries for ',str(len(failed_people_summaries)), ' people.')
+
+    print("FINISHED ADDING PEOPLE NAMES TO VOCABULARY.")
+
+    filename = 'failed_people_summaries.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(failed_people_summaries, fi)
+    print("CREATED PICKLE FILE WITH NAMES OF PEOPLE FOR WHOM SUMMARIES COULD NOT BE FOUND.")
+
+    #people descriptions
     global descriptions_original
     global descriptions
-    global corpus
-    global stops
-    for r in results:
-        descriptions_original.append(r['description']) #save original description for reference later
-        token = word_tokenize(r['description'].lower()) #tokenize
-        words = []
-        for w in token:
-            if not w in stops: #don't include stop words
-                w = (re.sub('[^A-Za-z0-9]+', '', w).lower()).strip() #remove punc & special chars
-                if w:
-                    words.append(w)
-        descriptions.append(" ".join(words))
-        corpus.append(words)
+    people_descriptions = people['description'].to_list()
+    for desc in people_descriptions:
+        if desc is not None: 
+            clean_desc = clean(desc)
+            if clean_desc:
+                descriptions_original.append(desc) 
+                descriptions.append(" ".join(clean_desc))
+                vocabulary.append(clean_desc)
+
+    print("FINISHED ADDING PEOPLE DESCRIPTIONS TO VOCABULARY.")
+
+    filename = 'descriptions_original.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(descriptions_original, fi)
+    print("CREATED PICKLE FILE WITH ORIGINAL DESCRIPTIONS.")
+
+    filename = 'descriptions.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(descriptions, fi)
+    print("CREATED PICKLE FILE WITH DESCRIPTIONS.")
+
+    #occupations, nations, awards
+    titles = graph.run("""CALL db.index.fulltext.queryNodes("Others", "*") YIELD node RETURN DISTINCT node.title AS title""").to_data_frame()
+    titles = titles['title'].to_list()
+    for title in titles:
+        if title is not None:
+            clean_title = clean(title)
+            if clean_title:
+                vocabulary.append(clean_title)
+
+    print("FINISHED ADDING OTHER TITLES TO VOCABULARY.")
+
+    filename = 'vocabulary.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(vocabulary, fi)
+
+    print("CREATED PICKLE FILE WITH VOCABULARY.")
+
+def generate_descriptions():
+    global descriptions_original
+    global descriptions
+    global vocabulary
+    connect_to_database()
+    global graph
+    #people nodes
+    people = graph.run("""CALL db.index.fulltext.queryNodes("People", "*") YIELD node RETURN DISTINCT node.name AS name, node.description AS description""").to_data_frame()
+    #people descriptions
+    people_descriptions = people['description'].to_list()
+    for desc in people_descriptions:
+        if desc is not None: 
+            descriptions_original.append(desc) 
+            clean_desc = clean(desc)
+            if clean_desc:
+                descriptions.append(" ".join(clean_desc))
+    print("FINISHED CREATING PEOPLE DESCRIPTIONS.")
+
+    filename = 'descriptions_original.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(descriptions_original, fi)
+    print("CREATED PICKLE FILE WITH ORIGINAL DESCRIPTIONS.")
+
+    filename = 'descriptions.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(descriptions, fi)
+    print("CREATED PICKLE FILE WITH DESCRIPTIONS.")
+
+#tokenize and sanitize
+def clean(string):
+    stops = set(stopwords.words("english"))
+    token = word_tokenize(string.lower()) #tokenize
+    words = []
+    for w in token:
+        if not w in stops: #don't include stop words
+            w = (re.sub('[^A-Za-z0-9]+', '', w).lower()).strip() #remove punc & special chars
+            if w:
+                words.append(w)
+    return words
+
+############### WORD2VEC ###############
 
 def build_word2vec_model():
     global word2vec_model
+    global vocabulary
     num_features = 300
     min_word_count = 20
     num_workers = multiprocessing.cpu_count()
@@ -51,7 +164,7 @@ def build_word2vec_model():
     downsampling = 1e-4
     seed = 2
 
-    word2vec_model = w2v.Word2Vec(
+    word2vec_model = Word2Vec(
         sg=1, #skip-gram
         seed=seed,
         workers=num_workers,
@@ -62,44 +175,13 @@ def build_word2vec_model():
     )
 
     print("BUILDING WORD2VEC_MODEL VOCAB")
-    word2vec_model.build_vocab(corpus)
+    word2vec_model.build_vocab(vocabulary)
 
     print("TRAINING WORD2VEC_MODEL")
-    word2vec_model.train(corpus, total_examples=word2vec_model.corpus_count, epochs=word2vec_model.epochs)
+    word2vec_model.train(vocabulary, total_examples=word2vec_model.corpus_count, epochs=word2vec_model.epochs)
 
-def create_word_points_matrix():
-    global word2vec_model
-    #reduce vector matrix of all the words to 2 dimensions
-    tsne = sklearn.manifold.TSNE(n_components = 2, early_exaggeration = 6, learning_rate = 500, n_iter = 2000, random_state = 2)
-    vector_matrix = word2vec_model.wv.syn0
-    vector_matrix_2d = tsne.fit_transform(vector_matrix)
-    word_points = pd.DataFrame([(word, coords[0], coords[1]) for word, coords in [(word, vector_matrix_2d[word2vec_model.wv.vocab[word].index]) for word in word2vec_model.wv.vocab]], columns=["word", "x", "y"])
-    return word_points
-
-def word_points_viz(word_points):
-    #scatterplot with all words
-    plt.scatter(word_points['x'], word_points['y'], c='lightblue')
-    for i, point in word_points.iterrows():
-        plt.text(point.x + 0.005, point.y + 0.005, point.word, fontsize=11)
-    plt.savefig('word_points.png')
-    plt.clf()
-
-def target_word_point_viz(word_points, target):
-    #scatterplot centered around a single word and the words with similarities closest to it 
-    target_word_point = word_points[word_points.word == target]
-    x = target_word_point.iloc[0]['x']
-    y = target_word_point.iloc[0]['y']
-    x_bounds=(x-50, x+50)
-    y_bounds=(y-50, y+50)
-    section = word_points[(x_bounds[0] <= word_points.x) & (word_points.x <= x_bounds[1]) & 
-                    (y_bounds[0] <= word_points.y) & (word_points.y <= y_bounds[1])]
-    plt.scatter(section['x'].tolist(), section['y'].tolist(), c='lightblue')
-    for i, point in section.iterrows():
-        plt.text(point.x + 0.005, point.y + 0.005, point.word, fontsize=11)
-    plt.scatter(x, y, c='coral')
-    plt.text(x + 0.005, y + 0.005, target, fontsize=11)
-    plt.savefig('target_word_point.png')
-    plt.clf()
+    print("SAVING WORD2VEC_MODEL")
+    word2vec_model.save("word2vec.model")
 
 def avg_vector(words, num_features):
     global word2vec_model
@@ -113,101 +195,255 @@ def avg_vector(words, num_features):
     if (n_words > 0):
         avg_vec = np.divide(avg_vec, n_words)
     return avg_vec
-
-def sanitize(desc):
-    token = word_tokenize(desc.lower())
-    words = []
-    for w in token:
-        if not w in stops: #don't include stop words
-            w = (re.sub('[^A-Za-z0-9]+', '', w).lower()).strip() #remove punc & special chars
-            if w:
-                words.append(w)
-    return " ".join(words)
     
 #SIMILARITY BETWEEN 2 DESCRIPTIONS
     #https://datascience.stackexchange.com/questions/23969/sentence-similarity-prediction
     #https://stackoverflow.com/questions/22129943/how-to-calculate-the-sentence-similarity-using-word2vec-model-of-gensim-with-pyt
     # get average vector for both descriptions you're comparing
     # get cosine similarity between vectors
-def similarity(node1, node2):
+def word2vec_similarity(node1, node2):
     global graph
-    #get average vector for each description
-    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN n.description AS description""".format(node1)).data()
+    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node1)).data()
     desc1 = results[0]['description']
-    desc1 = sanitize(desc1)
+    desc1 = " ".join(clean(desc1))
     desc1_avg_vector = avg_vector(desc1.split(), num_features=300)
-
-    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN n.description AS description""".format(node2)).data()
+    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node2)).data()
     desc2 = results[0]['description']
-    desc2 = sanitize(desc2)
+    desc2 = " ".join(clean(desc2))
     desc2_avg_vector = avg_vector(desc2.split(), num_features=300)
-
     sim = 1 - spatial.distance.cosine(desc1_avg_vector, desc2_avg_vector)
-    return sim
+    return sim, desc1, desc2
     #TODO: create relationship between 2 nodes with similar > 0.75 (see if this even happens with any)
 
+#create list of average description vectors
+#reduce vector matrix of all the words to 2 dimensions
 def create_desc_points_matrix():
-    #create list of average description vectors
+    global word2vec_desc_points
     desc_avg_vectors = []
     for desc in descriptions:
         desc_avg_vectors.append(avg_vector(desc.split(), num_features=300))
-    #reduce vector matrix of all the words to 2 dimensions
     tsne = sklearn.manifold.TSNE(n_components = 2, early_exaggeration = 6, learning_rate = 500, n_iter = 2000, random_state = 2)
     desc_vector_matrix = desc_avg_vectors
     desc_vector_matrix_2d = tsne.fit_transform(desc_vector_matrix)
-    desc_points = pd.DataFrame([(i, desc, desc_vector_matrix_2d[i][0], desc_vector_matrix_2d[i][1]) for i, desc in enumerate(descriptions)], columns=["num", "desc", "x", "y"])
-    return desc_points
+    word2vec_desc_points = pd.DataFrame([(i, desc, desc_vector_matrix_2d[i][0], desc_vector_matrix_2d[i][1]) for i, desc in enumerate(descriptions)], columns=["num", "desc", "x", "y"])
+    filename = 'word2vec_desc_points_matrix.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(word2vec_desc_points, fi)
 
-def desc_points_viz(desc_points):
-    #scatterplot with all descriptions
-    plt.scatter(desc_points['x'], desc_points['y'], c='lightblue')
-    for i, point in desc_points.iterrows():
-        label = graph.run("""MATCH (n:Person) WHERE n.description CONTAINS "{}" RETURN n.name AS name""".format(descriptions_original[point.num])).data()
-        label = label[0]['name']
-        plt.text(point.x + 0.005, point.y + 0.005, label, fontsize=11)
-    plt.savefig('desc_points.png')
-    plt.clf()
-        # desc_scatterplot = desc_points.plot.scatter(x='x', y='y', c='DarkBlue')
-        # desc_fig = desc_scatterplot.get_figure()
-        # desc_fig.savefig('desc_scatterplot.png')
-    #scatterplot centered around a single description (labeled with node title) and the nodes with description similarities closest to it 
-
-def target_desc_point_viz(desc_points, target):
-    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN n.description AS description""".format(target)).data()
-    desc = results[0]['description']
-    desc = sanitize(desc)
-    desc_tech_points = desc_points[desc_points.desc == desc]
+#scatterplot centered around a single description (labeled with node title) and the nodes with description similarities closest to it 
+def target_desc_point_viz(target):
+    global word2vec_desc_points
+    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(target.title())).data()
+    raw_desc = results[0]['description']
+    desc = " ".join(clean(raw_desc))
+    desc_tech_points = word2vec_desc_points[word2vec_desc_points.desc == desc]
     x = desc_tech_points.iloc[0]['x']
     y = desc_tech_points.iloc[0]['y']
     x_bounds=(x-5, x+5)
     y_bounds=(y-5, y+5)
-    section = desc_points[(x_bounds[0] <= desc_points.x) & (desc_points.x <= x_bounds[1]) & 
-                    (y_bounds[0] <= desc_points.y) & (desc_points.y <= y_bounds[1])]
-    plt.scatter(section['x'].tolist(), section['y'].tolist(), c='lightblue')
+    section = word2vec_desc_points[(x_bounds[0] <= word2vec_desc_points.x) & (word2vec_desc_points.x <= x_bounds[1]) & 
+                    (y_bounds[0] <= word2vec_desc_points.y) & (word2vec_desc_points.y <= y_bounds[1])]
+    names = []
+    cleaned_descriptions = []
     for i, point in section.iterrows():
-        label = graph.run("""MATCH (n:Person) WHERE n.description CONTAINS "{}" RETURN n.name AS name""".format(descriptions_original[point.num])).data()
-        label = label[0]['name']
-        plt.text(point.x + 0.005, point.y + 0.005, label, fontsize=11)
+        label = graph.run("""CALL db.index.fulltext.queryNodes("People", "{}") YIELD node, score RETURN DISTINCT node.name AS name, score""".format(descriptions[point.num])).data()
+        if label and label[0]['name'] not in names:
+            plt.scatter(point.x, point.y, c='lightblue')
+            plt.text(point.x + 0.005, point.y + 0.005, label[0]['name'], fontsize=11)
+            names.append(label[0]['name'])
+            cleaned_descriptions.append(descriptions[point.num])
     plt.scatter(x, y, c='coral')
     plt.text(x + 0.005, y + 0.005, target, fontsize=11)
     plt.savefig('target_desc_point.png')
     plt.clf()
 
+    #dataframe with graphed nodes and their similarities to the target node
+    print("Target Node: ", target.title())
+    print("Description: ", raw_desc)
+    sims = []
+    for name in names:
+        sims.append(word2vec_similarity(target.title(), name)[0]*100)
+    node_similarities = pd.DataFrame([(name, sims[i], cleaned_descriptions[i]) for i, name in enumerate(names)], columns=["Name", "Similarity", "Description (Cleaned)"])
+    print(node_similarities)
+
+############### DOC2VEC ###############
+
+def tag_vocabulary():
+    global vocabulary #should already be cleaned
+    global tagged_vocabulary
+    for index, vocab in enumerate(vocabulary):
+        tagged_vocabulary.append(gensim.models.doc2vec.TaggedDocument(vocab, [index]))
+    filename = 'tagged_vocabulary.pk'
+    with open(filename, 'wb') as fi:
+        pickle.dump(tagged_vocabulary, fi)
+    print("CREATED PICKLE FILE WITH TAGGED VOCABULARY.")
+
+def build_doc2vec_model():
+    global doc2vec_model
+    global tagged_vocabulary
+    doc2vec_model = Doc2Vec(dm=0, vector_size=200, min_count=2, epochs=100, window=4, dbow_word=1)
+    print("BUILDING DOC2VEC_MODEL VOCAB")
+    doc2vec_model.build_vocab(tagged_vocabulary)
+    print("TRAINING DOC2VEC_MODEL")
+    doc2vec_model.train(tagged_vocabulary, total_examples=doc2vec_model.corpus_count, epochs=doc2vec_model.epochs)
+    print("SAVING DOC2VEC_MODEL")
+    doc2vec_model.save("doc2vec.model")
+
+def doc2vec_similarity(node1, node2):
+    global doc2vec_model
+    #get descriptions of nodes
+    node1_results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node1.title())).data()
+    raw_desc1 = node1_results[0]['description']
+    desc1 = clean(raw_desc1)
+    node2_results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node2.title())).data()
+    raw_desc2 = node2_results[0]['description']
+    desc2 = clean(raw_desc2)
+    desc1_vector = doc2vec_model.infer_vector(desc1) 
+    desc2_vector = doc2vec_model.infer_vector(desc2)
+    sim = 1 - spatial.distance.cosine(desc1_vector, desc2_vector)
+    return sim, desc1, desc2 
+
+def doc2vec_most_similar(target):
+    global doc2vec_model
+    #get description of target node
+    target_results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(target.title())).data()
+    raw_desc = target_results[0]['description']
+    target_desc = clean(raw_desc)
+    target_desc_vector = doc2vec_model.infer_vector(target_desc)
+    top = doc2vec_model.docvecs.most_similar([target_desc_vector], topn=5)
+    top_names = []
+    top_sims = []
+    top_desc = []
+    for n in top:
+        sim = n[1]*100
+        clean_desc = " ".join(tagged_vocabulary[n[0]][0])
+        names = graph.run("""CALL db.index.fulltext.queryNodes("People", "{}") YIELD node, score RETURN DISTINCT node.name AS name, score""".format(clean_desc)).data()
+        for name in names:
+            if name['name'] != target.title():
+                top_names.append(name['name'])
+                top_sims.append(sim)
+                top_desc.append(clean_desc)
+
+    #TODO: think of how this could visualize
+
+    #dataframe with nodes and their similarities to the target node
+    print("Target Node: ", target.title())
+    print("Description: ", raw_desc)
+    node_similarities = pd.DataFrame([(name, top_sims[i], top_desc[i]) for i, name in enumerate(top_names)], columns=["Name", "Similarity", "Description (Cleaned)"])
+    print(node_similarities)
+
+############### MAIN ###############
+
 if __name__ == "__main__":
-    data_prep()
-    build_word2vec_model()
+    #load existing vocabulary
+    filename = 'vocabulary.pk'
+    try:
+        with open(filename, 'rb') as fi:
+            vocabulary = pickle.load(fi)
+    except:
+        print("COULD NOT OPEN VOCABULARY FILE, CREATING IT INSTEAD.")
+    if not vocabulary:
+        print('GENERATING VOCABULARY')
+        generate_vocabulary() 
+    else:
+        print("USING VOCABULARY FROM vocabulary.pk")
 
-    word_points = create_word_points_matrix()
-    # word_points_viz(word_points)
-    target_word_point_viz(word_points, 'education')
+    #load existing descriptions
+    filename1 = 'descriptions_original.pk'
+    filename2 = 'descriptions.pk'
+    try:
+        with open(filename1, 'rb') as fi1:
+            descriptions_original = pickle.load(fi1)
+        with open(filename2, 'rb') as fi2:
+            descriptions = pickle.load(fi2)
+    except:
+        print("COULD NOT OPEN ORIGINAL DESCRIPTIONS AND/OR DESCRIPTIONS FILE, CREATING IT INSTEAD.")
+    if not descriptions or not descriptions_original:
+        print('GENERATING DESCRIPTIONS')
+        generate_descriptions() 
+    else:
+        print("USING CLEANED AND ORIGINAL DESCRIPTIONS FROM descriptions.pk AND descriptions_original.pk, RESPECTIVELY.")
 
-    sim = similarity('Grace Hopper', 'Ada Lovelace')
-    print('Similarity between two nodes: ', str(sim*100))
+    #load existing word2vec model
+    try:
+        word2vec_model = Word2Vec.load("word2vec.model")
+    except:
+        print("COULD NOT LOAD WORD2VEC MODEL, BUILDING ONE INSTEAD.")
+    if not word2vec_model:
+        print("BUILDING WORD2VEC MODEL")
+        build_word2vec_model()
+    else:
+        print("USING EXISITNG WORD2VEC MODEL")
 
-    desc_points = create_desc_points_matrix()
-    # desc_points_viz(desc_points)
-    target_desc_point_viz(desc_points, 'Ada Lovelace')
+    #load existing word2vec points matrix
+    filename = 'word2vec_desc_points_matrix.pk'
+    try:
+        with open(filename, 'rb') as fi:
+            word2vec_desc_points = pickle.load(fi)
+    except:
+        print("COULD NOT OPEN WORD2VEC POINTS MATRIX FILE, CREATING THE MATRIX INSTEAD.")
+    if word2vec_desc_points.empty:
+        print('GENERATING MATRIX')
+        create_desc_points_matrix() 
+    else:
+        print("USING MATRIX FROM word2vec_desc_points_matrix.pk")
 
-    #TODO: # print(word2vec_model.most_similar("Ada") )
-    #TODO: doc2vec
-    #TODO: VISUALIZATIONS THAT COMPARE RESULTS FROM WORD2VEC & DOC2VEC
+    #connect to database if needed
+    if graph is None:
+        connect_to_database()
+    
+    #word2vec
+    if not word2vec_desc_points.empty:
+        node1 = 'Grace Hopper' #'Telle Whitney' #'Grace Hopper'
+        node2 = 'Ada Lovelace'#'Susan B. Horwitz' #'Ada Lovelace'
+        # Grace & Ada -> 72.78
+        # Telle & Susan -> 96.16
+        sim, desc1, desc2 = word2vec_similarity(node1, node2)
+        print('Word2Vec similarity between ', node1, ' and ', node2, ': ', str(sim*100))
+        print(node1, ' description: ', desc1)
+        print(node2, ' description: ', desc2)
+        
+        target_desc_point_viz('Ada Lovelace')
+    else:
+        print('NO WORD2VEC DESCRIPTION POINTS TO USE.')
+    #TODO: get the top 5 similar nodes to a target node with word2vec method
+
+
+    #doc2vec
+    #load existing tagged vocab
+    filename = 'tagged_vocabulary.pk'
+    try:
+        with open(filename, 'rb') as fi:
+            tagged_vocabulary = pickle.load(fi)
+    except:
+        print("COULD NOT OPEN TAGGED VOCABULARY FILE, TAGGING THE VOCABULARY NOW.")
+    if not tagged_vocabulary:
+        print('TAGGING VOCABULARY')
+        tag_vocabulary() 
+    else:
+        print("USING TAGGED VOCABULARY FROM tagged_vocabulary.pk")
+
+    #load existing doc2vec model
+    try:
+        doc2vec_model = Doc2Vec.load("doc2vec.model")
+    except:
+        print("COULD NOT LOAD DOC2VEC MODEL, BUILDING ONE INSTEAD.")
+    if not doc2vec_model:
+        print("BUILDING DOC2VEC MODEL")
+        build_doc2vec_model()
+    else:
+        print("USING EXISITNG DOC2VEC MODEL")
+
+
+    if doc2vec_model:
+        node1 = 'Grace Hopper' #'Telle Whitney' #'Grace Hopper'
+        node2 = 'Ada Lovelace'#'Susan B. Horwitz' #'Ada Lovelace'
+        # Grace & Ada -> 55.78
+        # Telle & Susan -> 84.65
+        sim, desc1, desc2 = doc2vec_similarity(node1, node2)
+        print('Doc2Vec similarity between ', node1, ' and ', node2, ': ', str(sim*100))
+        print(node1, ' description: ', desc1)
+        print(node2, ' description: ', desc2)
+
+        target = 'Ada Lovelace'
+        doc2vec_most_similar(target)
