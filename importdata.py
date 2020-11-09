@@ -180,3 +180,24 @@ DETACH DELETE p""")
 
 graph.run("""CALL db.index.fulltext.createNodeIndex("People",["Person"],["name", "birth", "death", "description"])""")
 graph.run("""CALL db.index.fulltext.createNodeIndex("Others",["Occupation", "Nation", "Award"],["title"])""")
+
+#create descriptions for nodes that didn't have them out of the nodes that they're connected to
+no_desc_names = graph.run("""MATCH (n:Person) WHERE NOT EXISTS (n.description) RETURN n.name AS name""")
+
+for name in no_desc_names:
+    name = name['name']
+    description = ""
+    occs = graph.run("""MATCH (p:Person)-[r]-(n:Occupation) WHERE p.name="{}" RETURN n.title AS title""".format(name))
+    for occ in occs:
+        description += " {} worked as a {}.".format(name, occ['title'])
+    awards = graph.run("""MATCH (p:Person)-[r]-(n:Award) WHERE p.name="{}" RETURN n.title AS title""".format(name))
+    for a in awards:
+        description += " She won the {}.".format(a['title'])
+    nations = graph.run("""MATCH (p:Person)-[r]-(n:Nation) WHERE p.name="{}" RETURN n.title AS title""".format(name))
+    for n in nations:
+        description += " {} was a citizen of {}.".format(name, n['title'])
+    description = description.replace('"', '')
+    print(description)
+
+    graph.run("""MATCH (p:Person) WHERE p.name="{}"
+                SET p.description = "{}\"""".format(name, description))
