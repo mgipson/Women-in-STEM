@@ -203,11 +203,11 @@ def avg_vector(words, num_features):
     # get cosine similarity between vectors
 def word2vec_similarity(node1, node2):
     global graph
-    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node1)).data()
+    results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(node1)).data()
     desc1 = results[0]['description']
     desc1 = " ".join(clean(desc1))
     desc1_avg_vector = avg_vector(desc1.split(), num_features=300)
-    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node2)).data()
+    results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(node2)).data()
     desc2 = results[0]['description']
     desc2 = " ".join(clean(desc2))
     desc2_avg_vector = avg_vector(desc2.split(), num_features=300)
@@ -233,37 +233,39 @@ def create_desc_points_matrix():
 #scatterplot centered around a single description (labeled with node title) and the nodes with description similarities closest to it 
 def target_desc_point_viz(target):
     global word2vec_desc_points
-    results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(target.title())).data()
-    raw_desc = results[0]['description']
-    desc = " ".join(clean(raw_desc))
-    desc_tech_points = word2vec_desc_points[word2vec_desc_points.desc == desc]
-    x = desc_tech_points.iloc[0]['x']
-    y = desc_tech_points.iloc[0]['y']
-    x_bounds=(x-5, x+5)
-    y_bounds=(y-5, y+5)
-    section = word2vec_desc_points[(x_bounds[0] <= word2vec_desc_points.x) & (word2vec_desc_points.x <= x_bounds[1]) & 
-                    (y_bounds[0] <= word2vec_desc_points.y) & (word2vec_desc_points.y <= y_bounds[1])]
-    names = []
-    cleaned_descriptions = []
-    for i, point in section.iterrows():
-        label = graph.run("""CALL db.index.fulltext.queryNodes("People", "{}") YIELD node, score RETURN DISTINCT node.name AS name, score""".format(descriptions[point.num])).data()
-        if label and label[0]['name'] not in names:
-            plt.scatter(point.x, point.y, c='lightblue')
-            plt.text(point.x + 0.005, point.y + 0.005, label[0]['name'], fontsize=11)
-            names.append(label[0]['name'])
-            cleaned_descriptions.append(descriptions[point.num])
-    plt.scatter(x, y, c='coral')
-    plt.text(x + 0.005, y + 0.005, target, fontsize=11)
+    global word2vec_model
+    results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(target.title())).data()
+    target_raw_desc = results[0]['description']
+    target_desc = clean(target_raw_desc)
+    target_desc_avg_vector = avg_vector(target_desc, num_features=300)
+    target_desc_points = word2vec_desc_points[word2vec_desc_points.desc == " ".join(target_desc)]
+    target_x = target_desc_points.iloc[0]['x']
+    target_y = target_desc_points.iloc[0]['y']
+
+    top_names = []
+    top_desc = []
+    top_sim = []
+
+    nodes = graph.run("""CALL db.index.fulltext.queryNodes("People", "*") YIELD node RETURN node.name AS name, node.description AS description""").data()
+    for node in nodes:
+        desc = clean(node['description'])
+        desc_avg_vector = avg_vector(desc, num_features=300)
+        sim = 1 - spatial.distance.cosine(desc_avg_vector, target_desc_avg_vector)
+        if sim >= 0.9:
+            top_names.append(node['name'])
+            top_desc.append(node['description'])
+            top_sim.append(sim)
+            desc_points = word2vec_desc_points[word2vec_desc_points.desc == " ".join(desc)]
+            x = desc_points.iloc[0]['x']
+            y = desc_points.iloc[0]['y']
+            plt.scatter(x, y, c='lightblue')
+            plt.text(x + 0.005, y + 0.005, node['name'], fontsize=11)
+    plt.scatter(target_x, target_y, c='coral')
+    plt.text(target_x + 0.005, target_y + 0.005, target, fontsize=11)
     plt.savefig('target_desc_point.png')
     plt.clf()
 
-    #dataframe with graphed nodes and their similarities to the target node
-    print("Target Node: ", target.title())
-    print("Description: ", raw_desc)
-    sims = []
-    for name in names:
-        sims.append(word2vec_similarity(target.title(), name)[0]*100)
-    node_similarities = pd.DataFrame([(name, sims[i], cleaned_descriptions[i]) for i, name in enumerate(names)], columns=["Name", "Similarity", "Description (Cleaned)"])
+    node_similarities = pd.DataFrame([(name, top_sim[i], top_desc[i]) for i, name in enumerate(top_names)], columns=["Name", "Similarity", "Description (Cleaned)"])
     print(node_similarities)
 
 ############### DOC2VEC ###############
@@ -292,10 +294,10 @@ def build_doc2vec_model():
 def doc2vec_similarity(node1, node2):
     global doc2vec_model
     #get descriptions of nodes
-    node1_results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node1.title())).data()
+    node1_results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(node1.title())).data()
     raw_desc1 = node1_results[0]['description']
     desc1 = clean(raw_desc1)
-    node2_results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(node2.title())).data()
+    node2_results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(node2.title())).data()
     raw_desc2 = node2_results[0]['description']
     desc2 = clean(raw_desc2)
     desc1_vector = doc2vec_model.infer_vector(desc1) 
@@ -306,7 +308,7 @@ def doc2vec_similarity(node1, node2):
 def doc2vec_most_similar(target):
     global doc2vec_model
     #get description of target node
-    target_results = graph.run("""MATCH (n:Person) WHERE n.name='{}' RETURN DISTINCT n.description AS description""".format(target.title())).data()
+    target_results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(target.title())).data()
     raw_desc = target_results[0]['description']
     target_desc = clean(raw_desc)
     target_desc_vector = doc2vec_model.infer_vector(target_desc)
@@ -315,14 +317,15 @@ def doc2vec_most_similar(target):
     top_sims = []
     top_desc = []
     for n in top:
-        sim = n[1]*100
-        clean_desc = " ".join(tagged_vocabulary[n[0]][0])
-        names = graph.run("""CALL db.index.fulltext.queryNodes("People", "{}") YIELD node, score RETURN DISTINCT node.name AS name, score""".format(clean_desc)).data()
-        for name in names:
-            if name['name'] != target.title():
-                top_names.append(name['name'])
-                top_sims.append(sim)
-                top_desc.append(clean_desc)
+        if n[1] >= 0.9:
+            sim = n[1]*100
+            clean_desc = " ".join(tagged_vocabulary[n[0]][0])
+            nodes = graph.run("""CALL db.index.fulltext.queryNodes("People", "{}") YIELD node, score RETURN DISTINCT node.name AS name, node.description AS description, score""".format(clean_desc)).data()
+            for node in nodes:
+                if node['name'] != target.title():
+                    top_names.append(node['name'])
+                    top_sims.append(sim)
+                    top_desc.append(" ".join(clean(node['description'])))
 
     #TODO: think of how this could visualize
 
