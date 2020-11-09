@@ -22,6 +22,7 @@ import numpy as np
 from scipy import spatial
 import pickle
 import gensim
+import time
 
 
 graph = None
@@ -36,9 +37,9 @@ doc2vec_model = None
 
 def connect_to_database():
     global graph
-    port = input("Enter Neo4j DB Port: ")
-    user = input("Enter Neo4j DB Username: ")
-    pswd = input("Enter Neo4j DB Password: ")
+    port = '7687' #input("Enter Neo4j DB Port: ")
+    user = 'neo4j' #input("Enter Neo4j DB Username: ")
+    pswd = 'stem' #input("Enter Neo4j DB Password: ")
     graph = Graph('bolt://localhost:'+port, auth=(user, pswd))
 
 def generate_vocabulary():
@@ -203,6 +204,7 @@ def avg_vector(words, num_features):
     # get cosine similarity between vectors
 def word2vec_similarity(node1, node2):
     global graph
+    word2vec_similarity_start = time.perf_counter()
     results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(node1)).data()
     desc1 = results[0]['description']
     desc1 = " ".join(clean(desc1))
@@ -212,6 +214,8 @@ def word2vec_similarity(node1, node2):
     desc2 = " ".join(clean(desc2))
     desc2_avg_vector = avg_vector(desc2.split(), num_features=300)
     sim = 1 - spatial.distance.cosine(desc1_avg_vector, desc2_avg_vector)
+    word2vec_similarity_end = time.perf_counter()
+    print(f"WORD2VEC SIMILARITY BETWEEN 2 DESCRIPTIONS TOOK {word2vec_similarity_end-word2vec_similarity_start:0.4f} seconds.")
     return sim, desc1, desc2
     #TODO: create relationship between 2 nodes with similar > 0.75 (see if this even happens with any)
 
@@ -231,9 +235,10 @@ def create_desc_points_matrix():
         pickle.dump(word2vec_desc_points, fi)
 
 #scatterplot centered around a single description (labeled with node title) and the nodes with description similarities closest to it 
-def target_desc_point_viz(target):
+def word2vec_most_similar(target):
     global word2vec_desc_points
     global word2vec_model
+    word2vec_target_start = time.perf_counter()
     results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(target.title())).data()
     target_raw_desc = results[0]['description']
     target_desc = clean(target_raw_desc)
@@ -267,6 +272,8 @@ def target_desc_point_viz(target):
 
     node_similarities = pd.DataFrame([(name, top_sim[i], top_desc[i]) for i, name in enumerate(top_names)], columns=["Name", "Similarity", "Description (Cleaned)"])
     print(node_similarities)
+    word2vec_target_end = time.perf_counter()
+    print(f"WORD2VEC FINDING TOP SIMILAR NODES TOOK {word2vec_target_end-word2vec_target_start:0.4f} seconds.")
 
 ############### DOC2VEC ###############
 
@@ -294,6 +301,7 @@ def build_doc2vec_model():
 def doc2vec_similarity(node1, node2):
     global doc2vec_model
     #get descriptions of nodes
+    doc2vec_similarity_start = time.perf_counter()
     node1_results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(node1.title())).data()
     raw_desc1 = node1_results[0]['description']
     desc1 = clean(raw_desc1)
@@ -303,10 +311,13 @@ def doc2vec_similarity(node1, node2):
     desc1_vector = doc2vec_model.infer_vector(desc1) 
     desc2_vector = doc2vec_model.infer_vector(desc2)
     sim = 1 - spatial.distance.cosine(desc1_vector, desc2_vector)
+    doc2vec_similarity_end = time.perf_counter()
+    print(f"DOC2VEC SIMILARITY BETWEEN 2 DESCRIPTIONS TOOK {doc2vec_similarity_end-doc2vec_similarity_start:0.4f} seconds.")
     return sim, desc1, desc2 
 
 def doc2vec_most_similar(target):
     global doc2vec_model
+    doc2vec_target_start = time.perf_counter()
     #get description of target node
     target_results = graph.run("""MATCH (n:Person) WHERE n.name="{}" RETURN DISTINCT n.description AS description""".format(target.title())).data()
     raw_desc = target_results[0]['description']
@@ -334,6 +345,8 @@ def doc2vec_most_similar(target):
     print("Description: ", raw_desc)
     node_similarities = pd.DataFrame([(name, top_sims[i], top_desc[i]) for i, name in enumerate(top_names)], columns=["Name", "Similarity", "Description (Cleaned)"])
     print(node_similarities)
+    doc2vec_target_end = time.perf_counter()
+    print(f"DOC2VEC FINDING TOP SIMILAR NODES TOOK {doc2vec_target_end-doc2vec_target_start:0.4f} seconds.")
 
 ############### MAIN ###############
 
@@ -397,6 +410,7 @@ if __name__ == "__main__":
     
     #word2vec
     if not word2vec_desc_points.empty:
+        print("------------------------------------------------------------------------")
         node1 = 'Grace Hopper' #'Telle Whitney' #'Grace Hopper'
         node2 = 'Ada Lovelace'#'Susan B. Horwitz' #'Ada Lovelace'
         # Grace & Ada -> 72.78
@@ -405,8 +419,8 @@ if __name__ == "__main__":
         print('Word2Vec similarity between ', node1, ' and ', node2, ': ', str(sim*100))
         print(node1, ' description: ', desc1)
         print(node2, ' description: ', desc2)
-        
-        target_desc_point_viz('Ada Lovelace')
+        print("------------------------------------------------------------------------")
+        word2vec_most_similar('Ada Lovelace')
     else:
         print('NO WORD2VEC DESCRIPTION POINTS TO USE.')
     #TODO: get the top 5 similar nodes to a target node with word2vec method
@@ -439,6 +453,7 @@ if __name__ == "__main__":
 
 
     if doc2vec_model:
+        print("------------------------------------------------------------------------")
         node1 = 'Grace Hopper' #'Telle Whitney' #'Grace Hopper'
         node2 = 'Ada Lovelace'#'Susan B. Horwitz' #'Ada Lovelace'
         # Grace & Ada -> 55.78
@@ -447,6 +462,6 @@ if __name__ == "__main__":
         print('Doc2Vec similarity between ', node1, ' and ', node2, ': ', str(sim*100))
         print(node1, ' description: ', desc1)
         print(node2, ' description: ', desc2)
-
+        print("------------------------------------------------------------------------")
         target = 'Ada Lovelace'
         doc2vec_most_similar(target)
